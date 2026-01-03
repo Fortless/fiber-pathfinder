@@ -1,6 +1,6 @@
 ***
 
-# Global Fiber Route Planner
+# Global Fiber Route Finder
 <img src="Screenshot 2026-01-04 at 01.07.27.png" alt="Application Screenshot" width="800">
 An intelligent fiber-optic pathfinding web application that calculates the shortest route between any two points on Earth using a hybrid graph of terrestrial and submarine cables.
 

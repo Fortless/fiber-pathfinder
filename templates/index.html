@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Global Fiber Route Planner</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body { margin: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f0f2f5; }
+        #map { height: 100vh; width: 100%; }
+
+        .ui-panel {
+            position: absolute; top: 20px; left: 20px; z-index: 1000;
+            background: white; padding: 25px; border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.15); width: 320px;
+            max-height: 85vh; display: flex; flex-direction: column;
+        }
+
+        h2 { margin: 0; color: #0078d4; font-size: 22px; }
+        .sub-text { font-size: 12px; color: #666; margin-bottom: 15px; margin-top: 5px; }
+
+        .btn {
+            background: #0078d4; color: white; border: none; width: 100%;
+            padding: 12px; border-radius: 6px; cursor: pointer; font-weight: bold;
+            margin-bottom: 10px; transition: background 0.2s;
+        }
+        .btn:hover { background: #005a9e; }
+        .btn-reset { background: #666; }
+
+        .results-section {
+            display: none; margin-top: 20px; border-top: 1px solid #eee; padding-top: 20px;
+            overflow: hidden; flex-direction: column;
+        }
+
+        .stat-group { display: flex; justify-content: space-between; margin-bottom: 15px; }
+        .stat-card { background: #eff6fc; padding: 10px; border-radius: 8px; width: 46%; text-align: center; }
+        .stat-card b { display: block; font-size: 18px; color: #0078d4; }
+        .stat-card span { font-size: 10px; color: #666; text-transform: uppercase; }
+
+        #partner-container { flex-grow: 1; overflow-y: auto; margin-top: 10px; }
+
+        .partner-item {
+            font-size: 11px; padding: 8px 10px; border-bottom: 1px solid #f3f2f1;
+            color: #333; cursor: pointer; transition: all 0.2s;
+            display: flex; align-items: center;
+        }
+        .partner-item:hover { background: #eff6fc; color: #0078d4; }
+        .partner-item.active { background: #0078d4; color: white; font-weight: bold; border-radius: 4px; }
+        .partner-item:before { content: "•"; color: #0078d4; font-weight: bold; margin-right: 8px; }
+        .partner-item.active:before { color: white; }
+
+        .show-all-item { background: #f3f2f1; font-weight: bold; margin-bottom: 5px; border-radius: 4px; }
+
+        #loading { display: none; color: #0078d4; font-weight: bold; font-size: 14px; text-align: center; padding: 10px; }
+    </style>
+</head>
+<body>
+
+<div class="ui-panel">
+    <h2>Fiber Route Finder</h2>
+    <div class="sub-text">Click map for Start/End. Select a provider to filter segments.</div>
+
+    <button class="btn" onclick="runCalculation()">Calculate Shortest Path</button>
+    <button class="btn btn-reset" onclick="resetMap()">Reset Markers</button>
+
+    <div id="loading">Calculating optimal route...</div>
+
+    <div id="results-meta" class="results-section">
+        <div class="stat-group">
+            <div class="stat-card"><b id="total-dist">0</b><span>Kilometers</span></div>
+            <div class="stat-card"><b id="rtt-val">0</b><span>Est. RTT (ms)</span></div>
+        </div>
+
+        <h4 style="margin: 0; font-size: 14px; color: #333;">Network Providers</h4>
+        <div id="partner-container">
+            <div id="partner-list"></div>
+        </div>
+    </div>
+</div>
+
+<div id="map"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+    var map = L.map('map', { zoomControl: false }).setView([45, 15], 4);
+    var startMarker, endMarker;
+    var pathGroup = L.featureGroup().addTo(map);
+    var junctionGroup = L.layerGroup().addTo(map);
+    var currentSelectedProvider = null;
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+
+    L.tileLayer.wms("https://bbmaps.itu.int/geoserver/ows", {
+        layers: 'ITU:trx_public_2,ITU:submarine_cables_s',
+        format: 'image/png', transparent: true, opacity: 0.35
+    }).addTo(map);
+
+    map.on('click', function(e) {
+        if (!startMarker) {
+            startMarker = L.marker(e.latlng).addTo(map);
+        } else if (!endMarker) {
+            endMarker = L.marker(e.latlng).addTo(map);
+        } else {
+            // If we click the map while a path exists, reset highlights
+            highlightProvider('all');
+        }
+    });
+
+    function resetMap() {
+        if (startMarker) map.removeLayer(startMarker);
+        if (endMarker) map.removeLayer(endMarker);
+        startMarker = null; endMarker = null;
+        pathGroup.clearLayers();
+        junctionGroup.clearLayers();
+        document.getElementById('results-meta').style.display = "none";
+        document.getElementById('loading').style.display = "none";
+        currentSelectedProvider = null;
+    }
+
+    function highlightProvider(ownerName) {
+        // Toggle off if clicking the same provider
+        if (ownerName === currentSelectedProvider) ownerName = 'all';
+        currentSelectedProvider = ownerName;
+
+        // UI: Update active state in sidebar
+        const items = document.querySelectorAll('.partner-item');
+        items.forEach(i => {
+            i.classList.remove('active');
+            if (i.innerText.includes(ownerName) && ownerName !== 'all') i.classList.add('active');
+        });
+
+        pathGroup.eachLayer(layer => {
+            if (layer instanceof L.Polyline) {
+                const defaultColor = layer.options.originalColor;
+
+                if (ownerName === 'all') {
+                    // Restore everyone
+                    layer.setStyle({ color: defaultColor, weight: 6, opacity: 0.8 });
+                } else if (layer.options.owner === ownerName) {
+                    // Highlight match
+                    layer.setStyle({ color: 'purple', weight: 12, opacity: 1 });
+                    layer.bringToFront();
+                } else {
+                    // Dim non-matches
+                    layer.setStyle({ color: defaultColor, weight: 4, opacity: 0.2 });
+                }
+            }
+        });
+    }
+
+    async function runCalculation() {
+        if (!startMarker || !endMarker) return alert("Select start and end points.");
+
+        const loading = document.getElementById('loading');
+        const results = document.getElementById('results-meta');
+
+        loading.style.display = "block";
+        results.style.display = "none";
+        pathGroup.clearLayers();
+        junctionGroup.clearLayers();
+
+        const s = startMarker.getLatLng();
+        const e = endMarker.getLatLng();
+
+        try {
+            const resp = await fetch(`/calculate?start_lat=${s.lat}&start_lon=${s.lng}&end_lat=${e.lat}&end_lon=${e.lng}`);
+            const data = await resp.json();
+            loading.style.display = "none";
+
+            if (data.status === "success") {
+                data.segments.forEach((seg, i) => {
+                    let color = seg.type === 'submarine' ? '#0078d4' : '#d83b01';
+                    if(seg.type === 'bridge') color = '#7f8c8d';
+
+                    let poly = L.polyline(seg.coords, {
+                        color: color,
+                        weight: 6,
+                        opacity: 0.8,
+                        originalColor: color,
+                        owner: seg.owner,
+                        dashArray: seg.type === 'bridge' ? '5, 10' : null
+                    }).addTo(pathGroup);
+
+                    poly.on('click', function(ev) {
+                        L.DomEvent.stopPropagation(ev);
+                        highlightProvider(seg.owner);
+                        this.bindPopup(`<b>${seg.owner}</b><br>${seg.dist} km`).openPopup();
+                    });
+
+                    // Handoff markers
+                    if (i < data.segments.length - 1) {
+                        const nextSeg = data.segments[i + 1];
+                        if (seg.owner !== nextSeg.owner || seg.type !== nextSeg.type) {
+                            L.circleMarker(seg.coords[1], {
+                                radius: 5, fillColor: "#ffea00", color: "#000", weight: 2, fillOpacity: 1
+                            }).addTo(junctionGroup).bindTooltip(`${seg.owner} ➔ ${nextSeg.owner}`);
+                        }
+                    }
+                });
+
+                results.style.display = "flex";
+                document.getElementById('total-dist').innerText = data.summary.total_km;
+                document.getElementById('rtt-val').innerText = data.summary.rtt;
+
+                // Add "Show Full Path" button + Provider list
+                let partnerHTML = `<div class="partner-item show-all-item" onclick="highlightProvider('all')">Show Full Route</div>`;
+
+                partnerHTML += data.partners.map(p => {
+                    const escapedName = p.replace(/'/g, "\\'");
+                    return `<div class="partner-item" onclick="highlightProvider('${escapedName}')">${p}</div>`;
+                }).join('');
+
+                document.getElementById('partner-list').innerHTML = partnerHTML;
+                map.fitBounds(pathGroup.getBounds(), { padding: [50, 50] });
+            } else {
+                alert(data.message);
+            }
+        } catch (err) {
+            loading.style.display = "none";
+            alert("Connection error.");
+        }
+    }
+</script>
+</body>
+</html>
